@@ -1,0 +1,34 @@
+version: '3.4'
+
+x-config_vags:
+  - &pg_image "postgres:11.5-alpine"
+
+volumes:
+  pg_last: 
+    driver: local
+
+  pg_lost: 
+    driver: local
+
+services:
+
+  pg_last:
+    image: *pg_image
+    environment: &pg_environment
+      - POSTGRES_USER=$POSTGRES_USER
+      - POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+      - POSTGRES_DB=$POSTGRES_DB
+      - PGDATA=/var/lib/postgresql/data
+    volumes:
+      - pg_last:/var/lib/postgresql/data
+    ports:
+      - "$LAST_DB_PORT:5432"
+
+  pg_lost:
+    image: *pg_image
+    environment: *pg_environment
+    volumes:
+      - pg_lost:/var/lib/postgresql/data
+    ports:
+      - "$LOST_DB_PORT:5432"
+

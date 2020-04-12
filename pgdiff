@@ -1,0 +1,162 @@
+#!/usr/bin/env ruby
+
+require "bundler/inline"
+
+gemfile do
+  source "https://rubygems.org"
+  gem "activerecord", "~> 5.2"
+  gem "pg",           "~> 1.2"
+  gem "dotenv",       "~> 2.7"
+end
+
+require "dotenv/load"
+require "active_record"
+
+DB_COMMON = {
+  adapter:  "postgresql",
+  host:     "localhost",
+  database: ENV.fetch("POSTGRES_DB"),
+  username: ENV.fetch("POSTGRES_USER"),
+  password: ENV.fetch("POSTGRES_PASSWORD"),
+  encoding: "unicode"
+}
+
+DB_NAME = DB_COMMON[:database]
+
+LAST_DB_PORT = ENV.fetch("LAST_DB_PORT");   # Database with last valid records
+LOST_DB_PORT = ENV.fetch("LOST_DB_PORT");   # Database with lost records
+
+EXCLUDE_TABLES = %w(ar_internal_metadata)
+
+EXCLUDE_COLUMNS = %w(updated_at last_sign_in_at current_sign_in_at sign_in_count last_sign_in_ip current_sign_in_ip ip_address remember_token remember_created_at)
+
+# Database with last valid records
+class Last < ActiveRecord::Base
+  establish_connection(DB_COMMON.merge(port: LAST_DB_PORT))
+end
+
+# Database with lost records
+class Lost < ActiveRecord::Base
+  establish_connection(DB_COMMON.merge(port: LOST_DB_PORT))
+end
+
+def latest_change_timestamp
+  sql = <<-EOF
+    SELECT * FROM information_schema.columns
+    WHERE table_catalog='#{ DB_NAME }' 
+      AND table_schema='public'
+      AND (column_name='updated_at' OR column_name='created_at')
+  EOF
+
+  columns = Last.connection.execute(sql)
+
+  latest_timestamp = ''
+
+  columns.each do |col|
+    table_name = col["table_name"]
+    column_name = col["column_name"]
+
+    records = Last.connection.execute("SELECT #{ column_name } FROM #{ table_name } ORDER BY #{ column_name } DESC LIMIT 1")
+    next if records.count == 0
+    timestamp = records[0][column_name]
+    latest_timestamp = timestamp if timestamp > latest_timestamp
+  end
+
+  latest_timestamp
+end
+
+def lost_created_records(after_timestamp)
+  sql = <<-EOF
+    SELECT * FROM information_schema.columns
+    WHERE table_catalog='#{ DB_NAME }' 
+      AND table_schema='public'
+      AND column_name='created_at'
+    ORDER BY table_name
+  EOF
+
+  columns = Lost.connection.execute(sql)
+  
+  columns.each do |col|
+    table_name = col["table_name"]
+
+    next if EXCLUDE_TABLES.include? table_name
+
+    records = Lost.connection.execute("SELECT id FROM #{ table_name } WHERE created_at > '#{ after_timestamp }' ORDER BY id")
+    next if records.count == 0
+
+    puts "  #{ table_name }: #{ records.map { |item| item["id"] } }"
+  end
+end
+
+def lost_updated_records(after_timestamp)
+  sql = <<-EOF
+    SELECT * FROM information_schema.columns
+    WHERE table_catalog='#{ DB_NAME }' 
+      AND table_schema='public'
+      AND column_name='updated_at'
+    ORDER BY table_name
+  EOF
+
+  tables = Lost.connection.execute(sql)
+
+  tables.each do |t|
+    table_name = t["table_name"]
+
+    next if EXCLUDE_TABLES.include? table_name
+
+    lost_updates = Lost.connection.execute("SELECT * FROM #{ table_name } WHERE updated_at > '#{ after_timestamp }' AND updated_at <> created_at ORDER BY id")
+    next if lost_updates.count == 0
+
+    puts "\n#{ table_name }: #{ lost_updates.map { |item| item["id"] } }"
+
+    table_schema_sql = <<-EOF
+      SELECT * FROM information_schema.columns
+      WHERE table_catalog='#{ DB_NAME }' 
+        AND table_schema='public'
+        AND table_name='#{ table_name }'
+      ORDER BY ordinal_position
+    EOF
+
+    table_columns = Lost.connection.execute(table_schema_sql)
+
+    lost_updates.each do |lost_record|
+      id = lost_record["id"]
+      puts "  ##{ id }"
+      last_record_results = Last.connection.execute("SELECT * FROM #{ table_name } WHERE id = #{ id }")
+      if last_record_results.count == 0
+        puts "    created, then updated"
+        next
+      end
+
+      last_record = last_record_results[0]
+
+      any_diff = false
+      table_columns.each do |column|
+        column_name = column["column_name"]
+        next if EXCLUDE_COLUMNS.include? column_name
+
+        if lost_record[column_name] != last_record[column_name]
+          any_diff = true
+          puts "    :#{ column_name }"
+          puts "      < #{ last_record[column_name] }"
+          puts "      > #{ lost_record[column_name] }" 
+        end
+      end
+
+      puts "    only metadata changed" unless any_diff
+    end
+  end
+end
+
+def main
+  latest_timestamp = latest_change_timestamp
+  puts "Latest timestamp: #{ latest_timestamp }"
+
+  puts "\n## Lost created\n\n"
+  lost_created_records latest_timestamp
+
+  puts "\n\n## Lost updated\n"
+  lost_updated_records latest_timestamp
+end
+
+main

@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# 
+# Usage:
+#   bin/db-import <service name> <filename>
+#
+# Arguments may go in any order
+#
+
+# realpath
+SCRIPT_PATH=`realpath $0`
+TOOLS_PATH=`dirname $SCRIPT_PATH`
+
+. $TOOLS_PATH/../.env
+
+for i in {0..1}; do
+  [[ -z "$1" ]] && break
+  [[ -f "$1" ]] && filename=$1 || service_name=$1
+  shift
+done
+
+[[ ! -z "$1" ]] && echo "Usage: bin/db-import <service name> <filename>  # in any order" && exit 1
+
+[[ -z "`$TOOLS_PATH/container_id $service_name`" ]] && echo "Error: $service_name neither valid filename or service name" && exit 1
+[[ -z "$filename" ]] && echo "Error: snapshot $filename not found" && exit 1
+
+cat $filename | sudo docker exec -i `$TOOLS_PATH/container_id $service_name` /bin/sh -c "pg_restore | psql -U $POSTGRES_USER $POSTGRES_DB"
+
